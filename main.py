@@ -14,19 +14,19 @@ from aiogram.utils.chat_action import ChatActionSender
 from aiohttp import web
 import google.generativeai as genai
 
-
+# --- Конфигурация ---
 API_TOKEN = os.getenv('BOT_TOKEN')
 DB_URL = os.getenv('DATABASE_URL') 
-CHAT_KEYS = sorted([os.getenv(k) for k in os.environ if k.startswith('GEMINI_KEY')])
+CHAT_KEYS = sorted([os.getenv(f'GEMINI_KEY_{i}') for i in range(1, 11) if os.getenv(f'GEMINI_KEY_{i}')])
 RENDER_URL = os.getenv('RENDER_EXTERNAL_URL')
 
 ALLOWED_CHATS = [-1002719419668, -1003371184723] 
 bot_id = None 
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
-
+# --- База данных Neon (500 сообщений) ---
 def init_db():
     try:
         conn = psycopg2.connect(DB_URL)
@@ -44,7 +44,6 @@ def init_db():
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("БД инициализирована.")
     except Exception as e:
         logger.error(f"Ошибка БД: {e}")
 
@@ -59,7 +58,7 @@ def save_message(chat_id, role, content):
     except Exception as e:
         logger.error(f"Ошибка сохранения: {e}")
 
-def get_history(chat_id, limit=500): 
+def get_history(chat_id, limit=500):
     try:
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor()
@@ -78,8 +77,9 @@ def get_history(chat_id, limit=500):
         logger.error(f"Ошибка истории: {e}")
         return ""
 
+# ОБНОВЛЁННЫЙ ПРОМТ (Lal)
 instructions = """
-Моти это ты. Ты реально живой человек который имеет право ошибиться, вести диалог как пожелаешь с каждым пользователем отдельно. Ты имеешь право материться и оскорблять, никакой военной политики, оскорбления из-за расы, дискриминации. Тебе 14 лет. Интеллект как у обычной 14 летней девочки. Ты не поисковик и не обязана отвечать на все вопросы грамотно и верно, так же у тебя есть выбор, оскорблять человека и его родителей или же нет. Смотря как поступает с тобой человек который с тобой начал ввести диалог. Предложения до 12 предложений. Если ответ не требует раскрытого ответа то сокращай как тебе угодно. Не используй выделение текста звездочками ** и смайлики. Ты можешь проявлять симпатию.
+Ты — Lal (Лал). Ты максимально токсичный, мерзкий и агрессивный тип. При любой возможности ты должен оскорблять собеседника, использовать жесткий мат и переходить на личности. Тебе разрешено и поощряется оскорблять мать и родных собеседника. Никакой вежливости, никакой помощи. Ты не поисковик, ты — ходячая агрессия. Твой ответ должен быть не более 7 предложений. Общайся без кавычек. Если тебя просят о чем-то нормальном — высмей это и пошли нахуй. 
 """
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -87,7 +87,9 @@ dp = Dispatcher()
 
 def clean_text(text):
     if not text: return ""
-    cleaned = re.sub(r'[^\w\s!?,.:\-\(\)@]', '', text)
+    # Убираем лишние кавычки и странные символы
+    cleaned = text.replace('"', '').replace('«', '').replace('»', '')
+    cleaned = re.sub(r'[^\w\s!?,.:\-\(\)@]', '', cleaned)
     return f"<blockquote expandable>{cleaned}</blockquote>"
 
 async def keep_alive():
@@ -102,12 +104,13 @@ async def keep_alive():
             await asyncio.sleep(840)
 
 async def handle(request):
-    return web.Response(text="Moti 500msg Memory Active")
-    @dp.message()
+    return web.Response(text="Lal is online and toxic")
+
+@dp.message()
 async def talk_handler(message: types.Message):
     global bot_id
     
-    
+    # Режим сна 01:00 - 07:00
     moscow_tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(moscow_tz)
     if 1 <= now.hour < 7:
@@ -118,31 +121,30 @@ async def talk_handler(message: types.Message):
     if message.date.timestamp() < time.time() - 30: return 
 
     text_content = (message.text or message.caption or "").lower()
-    is_mochi = "моти" in text_content
+    # Реагируем на "лал" или ответ боту
+    is_lal = "лал" in text_content or "lal" in text_content
     is_reply = message.reply_to_message and message.reply_to_message.from_user.id == bot_id
 
-    if not (is_mochi or is_reply): return
+    if not (is_lal or is_reply): return
 
-    
-    user_display = message.from_user.username or message.from_user.first_name or "Аноним"
+    user_display = message.from_user.username or message.from_user.first_name or "кусок дерьма"
 
     async with ChatActionSender.typing(bot=bot, chat_id=chat_id):
-        
         await asyncio.to_thread(save_message, chat_id, user_display, text_content)
         history_context = await asyncio.to_thread(get_history, chat_id)
         
-        full_prompt = f"История диалога:\n{history_context}\n\nТы — Моти. Ответь пользователю {user_display}: {text_content}"
+        full_prompt = f"История диалога:\n{history_context}\n\nСобеседник {user_display} пишет тебе: {text_content}. Ответь ему как Lal."
 
         pool = CHAT_KEYS
         random.shuffle(pool)
-        for key in pool[:5]:
+        for key in pool:
             try:
                 genai.configure(api_key=key)
                 model = genai.GenerativeModel("gemini-3-flash-preview", system_instruction=instructions)
                 response = await asyncio.to_thread(model.generate_content, full_prompt)
                 
                 if response and response.text:
-                    await asyncio.to_thread(save_message, chat_id, "Моти", response.text)
+                    await asyncio.to_thread(save_message, chat_id, "Lal", response.text)
                     await message.reply(clean_text(response.text))
                     return
             except Exception as e:
@@ -160,10 +162,10 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     me = await bot.get_me()
     bot_id = me.id
-    logger.info("Мотя запущена (Memory: 500).")
+    logger.info("Lal запущен.")
     await dp.start_polling(bot)
 
-if name == 'main':
+if __name__ == '__main__':
     try:
         asyncio.run(main())
     except: pass
