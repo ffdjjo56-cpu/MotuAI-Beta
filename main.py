@@ -20,7 +20,7 @@ DB_URL = os.getenv('DATABASE_URL')
 CHAT_KEYS = sorted([os.getenv(f'GEMINI_KEY_{i}') for i in range(1, 11) if os.getenv(f'GEMINI_KEY_{i}')])
 RENDER_URL = os.getenv('RENDER_EXTERNAL_URL')
 
-ALLOWED_CHATS = [-1002719419668, -1003371184723] 
+ALLOWED_CHATS = [-1003371184723] 
 bot_id = None 
 
 logging.basicConfig(level=logging.INFO)
