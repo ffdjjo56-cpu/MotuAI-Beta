@@ -103,3 +103,67 @@ async def keep_alive():
 
 async def handle(request):
     return web.Response(text="Moti 500msg Memory Active")
+    @dp.message()
+async def talk_handler(message: types.Message):
+    global bot_id
+    
+    
+    moscow_tz = pytz.timezone('Europe/Moscow')
+    now = datetime.now(moscow_tz)
+    if 1 <= now.hour < 7:
+        return 
+
+    chat_id = message.chat.id
+    if chat_id not in ALLOWED_CHATS and message.chat.type != "private": return
+    if message.date.timestamp() < time.time() - 30: return 
+
+    text_content = (message.text or message.caption or "").lower()
+    is_mochi = "моти" in text_content
+    is_reply = message.reply_to_message and message.reply_to_message.from_user.id == bot_id
+
+    if not (is_mochi or is_reply): return
+
+    
+    user_display = message.from_user.username or message.from_user.first_name or "Аноним"
+
+    async with ChatActionSender.typing(bot=bot, chat_id=chat_id):
+        
+        await asyncio.to_thread(save_message, chat_id, user_display, text_content)
+        history_context = await asyncio.to_thread(get_history, chat_id)
+        
+        full_prompt = f"История диалога:\n{history_context}\n\nТы — Моти. Ответь пользователю {user_display}: {text_content}"
+
+        pool = CHAT_KEYS
+        random.shuffle(pool)
+        for key in pool[:5]:
+            try:
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel("gemini-3-flash-preview", system_instruction=instructions)
+                response = await asyncio.to_thread(model.generate_content, full_prompt)
+                
+                if response and response.text:
+                    await asyncio.to_thread(save_message, chat_id, "Моти", response.text)
+                    await message.reply(clean_text(response.text))
+                    return
+            except Exception as e:
+                logger.error(f"Ошибка ключа: {e}")
+                continue
+
+async def main():
+    global bot_id
+    init_db() 
+    app = web.Application(); app.router.add_get("/", handle)
+    runner = web.AppRunner(app); await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000))).start()
+    
+    asyncio.create_task(keep_alive())
+    await bot.delete_webhook(drop_pending_updates=True)
+    me = await bot.get_me()
+    bot_id = me.id
+    logger.info("Мотя запущена (Memory: 500).")
+    await dp.start_polling(bot)
+
+if name == 'main':
+    try:
+        asyncio.run(main())
+    except: pass
