@@ -2,28 +2,25 @@ import os
 import logging
 import asyncio
 import random
-import re
-from datetime import datetime
-import pytz
 import psycopg2
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
 import google.generativeai as genai
 
-# --- Настройки ---
+# --- Конфигурация из Environment Variables ---
 TOKEN = os.getenv('BOT_TOKEN')
 DB_URL = os.getenv('DATABASE_URL')
-# Собираем все доступные ключи Gemini
+# Собираем ключи 1-10
 KEYS = [os.getenv(f'GEMINI_KEY_{i}') for i in range(1, 11) if os.getenv(f'GEMINI_KEY_{i}')]
 ALLOWED_CHATS = [-1002719419668, -1003371184723]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Веб-сервер для обхода Port Scan Timeout на Render ---
+# --- Веб-сервер (чтобы Render не убивал бота) ---
 async def handle(request):
-    return web.Response(text="Lal is active")
+    return web.Response(text="Lal Gemini 3 is active")
 
 async def start_server():
     app = web.Application()
@@ -33,40 +30,45 @@ async def start_server():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    logger.info(f"Web server started on port {port}")
 
-# --- Работа с БД Neon ---
+# --- База данных Neon ---
 def init_db():
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS chat_history")
-    cur.execute("""
-        CREATE TABLE chat_history (
-            id SERIAL PRIMARY KEY,
-            chat_id BIGINT,
-            role TEXT,
-            content TEXT
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS chat_history")
+        cur.execute("""
+            CREATE TABLE chat_history (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                role TEXT,
+                content TEXT
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("DB Initialized")
+    except Exception as e:
+        logger.error(f"DB Error: {e}")
 
-# --- Логика Lal ---
-def get_gemini_response(text):
-    # Выбираем случайный ключ для обхода лимитов
-    genai.configure(api_key=random.choice(KEYS))
-    model = genai.GenerativeModel('gemini-2.0-flash-exp') # Используем актуальную Flash
+# --- Запрос к Gemini 3 Flash Preview ---
+async def get_gemini_response(text):
+    api_key = random.choice(KEYS)
+    genai.configure(api_key=api_key)
     
-    # Твой основной промт
+    # Указываем именно Gemini 3 Flash Preview
+    model = genai.GenerativeModel('gemini-3-flash-preview')
+    
     prompt = (
         "Ты — Lal. Ты крайне токсичный, агрессивный и грубый собеседник. "
-        "Ты ненавидишь всех вокруг, постоянно хамишь, используешь мат и оскорбления. "
-        "Твои ответы должны быть короткими, едкими и максимально неприятными. "
-        "Никогда не помогай и не будь вежливым. Если тебя тегают или пишут 'лал'/'lal', "
-        "унизь собеседника. Пиши только на русском."
+        "Ты ненавидишь всех вокруг, хамишь, используешь мат. "
+        "Твои ответы короткие, едкие и унизительные. "
+        "Никогда не помогай. Пиши только на русском."
     )
     
-    response = model.generate_content(f"{prompt}\n\nПользователь: {text}")
+    response = await model.generate_content_async(f"{prompt}\n\nПользователь: {text}")
     return response.text
 
 # --- Обработка сообщений ---
@@ -75,26 +77,26 @@ dp = Dispatcher()
 
 @dp.message(F.chat.id.in_(ALLOWED_CHATS))
 async def handle_message(message: types.Message):
-    # Режим сна с 01:00 до 07:00 по МСК
-    moscow_tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(moscow_tz).hour
-    if 1 <= now <= 7:
+    if not message.text:
         return
 
-    # Реагируем на тег или кодовое слово
-    if message.text and (bot.id in [e.user.id for e in (message.entities or []) if e.type == "mention"] 
-                         or "лал" in message.text.lower() or "lal" in message.text.lower()):
-        
+    # Триггеры: тег бота или слово "лал"
+    is_mentioned = bot.id in [e.user.id for e in (message.entities or []) if e.type == "mention"]
+    has_trigger = "лал" in message.text.lower() or "lal" in message.text.lower()
+
+    if is_mentioned or has_trigger:
         try:
-            reply = get_gemini_response(message.text)
+            # Показываем, что бот печатает
+            await bot.send_chat_action(message.chat.id, "typing")
+            reply = await get_gemini_response(message.text)
             await message.reply(reply)
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Gemini Error: {e}")
 
 async def main():
     init_db()
     await start_server()
-    logger.info("Lal запущен.")
+    logger.info("Lal (Gemini 3) запущен.")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
