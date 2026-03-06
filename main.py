@@ -1,171 +1,101 @@
 import os
 import logging
 import asyncio
-import time
 import random
 import re
-import aiohttp
-import psycopg2 
-import pytz
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types
-from aiogram.client.default import DefaultBotProperties
-from aiogram.utils.chat_action import ChatActionSender
+import pytz
+import psycopg2
 from aiohttp import web
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.client.default import DefaultBotProperties
 import google.generativeai as genai
 
-# --- Конфигурация ---
-API_TOKEN = os.getenv('BOT_TOKEN')
-DB_URL = os.getenv('DATABASE_URL') 
-CHAT_KEYS = sorted([os.getenv(f'GEMINI_KEY_{i}') for i in range(1, 11) if os.getenv(f'GEMINI_KEY_{i}')])
-RENDER_URL = os.getenv('RENDER_EXTERNAL_URL')
-
-ALLOWED_CHATS = [-1003371184723] 
-bot_id = None 
+# --- Настройки ---
+TOKEN = os.getenv('BOT_TOKEN')
+DB_URL = os.getenv('DATABASE_URL')
+# Собираем все доступные ключи Gemini
+KEYS = [os.getenv(f'GEMINI_KEY_{i}') for i in range(1, 11) if os.getenv(f'GEMINI_KEY_{i}')]
+ALLOWED_CHATS = [-1002719419668, -1003371184723]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- База данных Neon (500 сообщений) ---
+# --- Веб-сервер для обхода Port Scan Timeout на Render ---
+async def handle(request):
+    return web.Response(text="Lal is active")
+
+async def start_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+# --- Работа с БД Neon ---
 def init_db():
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor()
-        cur.execute("DROP TABLE IF EXISTS chat_history") 
-        cur.execute("""
-            CREATE TABLE chat_history (
-                id SERIAL PRIMARY KEY,
-                chat_id BIGINT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Ошибка БД: {e}")
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS chat_history")
+    cur.execute("""
+        CREATE TABLE chat_history (
+            id SERIAL PRIMARY KEY,
+            chat_id BIGINT,
+            role TEXT,
+            content TEXT
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
-def save_message(chat_id, role, content):
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor()
-        cur.execute("INSERT INTO chat_history (chat_id, role, content) VALUES (%s, %s, %s)", (chat_id, role, content))
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Ошибка сохранения: {e}")
+# --- Логика Lal ---
+def get_gemini_response(text):
+    # Выбираем случайный ключ для обхода лимитов
+    genai.configure(api_key=random.choice(KEYS))
+    model = genai.GenerativeModel('gemini-2.0-flash-exp') # Используем актуальную Flash
+    
+    # Твой основной промт
+    prompt = (
+        "Ты — Lal. Ты крайне токсичный, агрессивный и грубый собеседник. "
+        "Ты ненавидишь всех вокруг, постоянно хамишь, используешь мат и оскорбления. "
+        "Твои ответы должны быть короткими, едкими и максимально неприятными. "
+        "Никогда не помогай и не будь вежливым. Если тебя тегают или пишут 'лал'/'lal', "
+        "унизь собеседника. Пиши только на русском."
+    )
+    
+    response = model.generate_content(f"{prompt}\n\nПользователь: {text}")
+    return response.text
 
-def get_history(chat_id, limit=500):
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT role, content FROM (
-                SELECT role, content, created_at FROM chat_history 
-                WHERE chat_id = %s 
-                ORDER BY created_at DESC LIMIT %s
-            ) sub ORDER BY created_at ASC
-        """, (chat_id, limit))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return "\n".join([f"{r}: {c}" for r, c in rows])
-    except Exception as e:
-        logger.error(f"Ошибка истории: {e}")
-        return ""
-
-# ОБНОВЛЁННЫЙ ПРОМТ (Lal)
-instructions = """
-Ты — Lal (Лал). Ты максимально токсичный, мерзкий и агрессивный тип. При любой возможности ты должен оскорблять собеседника, использовать жесткий мат и переходить на личности. Тебе разрешено и поощряется оскорблять мать и родных собеседника. Никакой вежливости, никакой помощи. Ты не поисковик, ты — ходячая агрессия. Твой ответ должен быть не более 7 предложений. Общайся без кавычек. Если тебя просят о чем-то нормальном — высмей это и пошли нахуй. 
-"""
-
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+# --- Обработка сообщений ---
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
 
-def clean_text(text):
-    if not text: return ""
-    # Убираем лишние кавычки и странные символы
-    cleaned = text.replace('"', '').replace('«', '').replace('»', '')
-    cleaned = re.sub(r'[^\w\s!?,.:\-\(\)@]', '', cleaned)
-    return f"<blockquote expandable>{cleaned}</blockquote>"
-
-async def keep_alive():
-    if not RENDER_URL: return
-    await asyncio.sleep(30)
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                async with session.get(RENDER_URL) as resp:
-                    logger.info(f"Статус само-пинга: {resp.status}")
-            except: pass
-            await asyncio.sleep(840)
-
-async def handle(request):
-    return web.Response(text="Lal is online and toxic")
-
-@dp.message()
-async def talk_handler(message: types.Message):
-    global bot_id
-    
-    # Режим сна 01:00 - 07:00
+@dp.message(F.chat.id.in_(ALLOWED_CHATS))
+async def handle_message(message: types.Message):
+    # Режим сна с 01:00 до 07:00 по МСК
     moscow_tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(moscow_tz)
-    if 1 <= now.hour < 7:
-        return 
+    now = datetime.now(moscow_tz).hour
+    if 1 <= now <= 7:
+        return
 
-    chat_id = message.chat.id
-    if chat_id not in ALLOWED_CHATS and message.chat.type != "private": return
-    if message.date.timestamp() < time.time() - 30: return 
-
-    text_content = (message.text or message.caption or "").lower()
-    # Реагируем на "лал" или ответ боту
-    is_lal = "лал" in text_content or "lal" in text_content
-    is_reply = message.reply_to_message and message.reply_to_message.from_user.id == bot_id
-
-    if not (is_lal or is_reply): return
-
-    user_display = message.from_user.username or message.from_user.first_name or "кусок дерьма"
-
-    async with ChatActionSender.typing(bot=bot, chat_id=chat_id):
-        await asyncio.to_thread(save_message, chat_id, user_display, text_content)
-        history_context = await asyncio.to_thread(get_history, chat_id)
+    # Реагируем на тег или кодовое слово
+    if message.text and (bot.id in [e.user.id for e in (message.entities or []) if e.type == "mention"] 
+                         or "лал" in message.text.lower() or "lal" in message.text.lower()):
         
-        full_prompt = f"История диалога:\n{history_context}\n\nСобеседник {user_display} пишет тебе: {text_content}. Ответь ему как Lal."
-
-        pool = CHAT_KEYS
-        random.shuffle(pool)
-        for key in pool:
-            try:
-                genai.configure(api_key=key)
-                model = genai.GenerativeModel("gemini-3-flash-preview", system_instruction=instructions)
-                response = await asyncio.to_thread(model.generate_content, full_prompt)
-                
-                if response and response.text:
-                    await asyncio.to_thread(save_message, chat_id, "Lal", response.text)
-                    await message.reply(clean_text(response.text))
-                    return
-            except Exception as e:
-                logger.error(f"Ошибка ключа: {e}")
-                continue
+        try:
+            reply = get_gemini_response(message.text)
+            await message.reply(reply)
+        except Exception as e:
+            logger.error(f"Error: {e}")
 
 async def main():
-    global bot_id
-    init_db() 
-    app = web.Application(); app.router.add_get("/", handle)
-    runner = web.AppRunner(app); await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000))).start()
-    
-    asyncio.create_task(keep_alive())
-    await bot.delete_webhook(drop_pending_updates=True)
-    me = await bot.get_me()
-    bot_id = me.id
+    init_db()
+    await start_server()
     logger.info("Lal запущен.")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except: pass
+    asyncio.run(main())
