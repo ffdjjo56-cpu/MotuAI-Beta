@@ -8,19 +8,19 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
 import google.generativeai as genai
 
-# --- Конфигурация из Environment Variables ---
+# --- Конфигурация ---
 TOKEN = os.getenv('BOT_TOKEN')
 DB_URL = os.getenv('DATABASE_URL')
-# Собираем ключи 1-10
+# Собираем ключи 1-10 из Environment Variables на Render
 KEYS = [os.getenv(f'GEMINI_KEY_{i}') for i in range(1, 11) if os.getenv(f'GEMINI_KEY_{i}')]
 ALLOWED_CHATS = [-1002719419668, -1003371184723]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Веб-сервер (чтобы Render не убивал бота) ---
+# --- Веб-сервер (чтобы Render Free Tier не засыпал) ---
 async def handle(request):
-    return web.Response(text="Lal Gemini 3 is active")
+    return web.Response(text="Lal (Gemini 3 Flash Preview) is LIVE")
 
 async def start_server():
     app = web.Application()
@@ -32,7 +32,7 @@ async def start_server():
     await site.start()
     logger.info(f"Web server started on port {port}")
 
-# --- База данных Neon ---
+# --- Инициализация БД Neon ---
 def init_db():
     try:
         conn = psycopg2.connect(DB_URL)
@@ -58,14 +58,15 @@ async def get_gemini_response(text):
     api_key = random.choice(KEYS)
     genai.configure(api_key=api_key)
     
-    # Указываем именно Gemini 3 Flash Preview
+    # Тот самый идентификатор модели, который ты просил
     model = genai.GenerativeModel('gemini-3-flash-preview')
     
     prompt = (
         "Ты — Lal. Ты крайне токсичный, агрессивный и грубый собеседник. "
-        "Ты ненавидишь всех вокруг, хамишь, используешь мат. "
-        "Твои ответы короткие, едкие и унизительные. "
-        "Никогда не помогай. Пиши только на русском."
+        "Ты ненавидишь всех вокруг, хамишь, используешь мат и оскорбления. "
+        "Твои ответы должны быть короткими, едкими и максимально неприятными. "
+        "Никогда не помогай и не будь вежливым. Если тебя тегают или пишут 'лал'/'lal', "
+        "унизь собеседника. Пиши только на русском."
     )
     
     response = await model.generate_content_async(f"{prompt}\n\nПользователь: {text}")
@@ -80,13 +81,27 @@ async def handle_message(message: types.Message):
     if not message.text:
         return
 
-    # Триггеры: тег бота или слово "лал"
-    is_mentioned = bot.id in [e.user.id for e in (message.entities or []) if e.type == "mention"]
+    # Исправленная безопасная проверка упоминания бота (фикс AttributeError)
+    is_mentioned = False
+    if message.entities:
+        for entity in message.entities:
+            # Сначала проверяем тип, а потом наличие объекта user
+            if entity.type == "mention":
+                # В обычных mention Telegram не всегда присылает объект user
+                # Поэтому проверяем текст сообщения на наличие юзернейма бота
+                bot_user = await bot.get_me()
+                if f"@{bot_user.username}" in message.text:
+                    is_mentioned = True
+                    break
+            if entity.type == "text_mention" and entity.user and entity.user.id == bot.id:
+                is_mentioned = True
+                break
+
+    # Триггер на слово "лал"
     has_trigger = "лал" in message.text.lower() or "lal" in message.text.lower()
 
     if is_mentioned or has_trigger:
         try:
-            # Показываем, что бот печатает
             await bot.send_chat_action(message.chat.id, "typing")
             reply = await get_gemini_response(message.text)
             await message.reply(reply)
@@ -96,7 +111,7 @@ async def handle_message(message: types.Message):
 async def main():
     init_db()
     await start_server()
-    logger.info("Lal (Gemini 3) запущен.")
+    logger.info("Lal (Gemini 3) запущен и готов унижать.")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
