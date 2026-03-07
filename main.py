@@ -10,16 +10,17 @@ from google.api_core import exceptions
 
 # --- Конфигурация ---
 TOKEN = os.getenv('BOT_TOKEN')
-# Собираем все ключи GEMINI_KEY_
+# Автоматический сбор всех ключей GEMINI_KEY_ из переменных окружения Render
 ALL_KEYS = [os.getenv(k) for k in os.environ if k.startswith('GEMINI_KEY_')]
+# Список разрешенных чатов
 ALLOWED_CHATS = [-1002719419668, -1003371184723, -1002416957116]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Веб-сервер для Render ---
+# --- Веб-сервер для поддержания жизни на Render ---
 async def handle(request):
-    return web.Response(text=f"Lal is unstoppable. Keys: {len(ALL_KEYS)}")
+    return web.Response(text=f"Lal is running. Keys detected: {len(ALL_KEYS)}")
 
 async def start_server():
     app = web.Application()
@@ -30,7 +31,7 @@ async def start_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- Система подбора ключа ---
+# --- Система мгновенного подбора рабочего ключа ---
 async def get_gemini_response(text):
     keys_pool = ALL_KEYS.copy()
     random.shuffle(keys_pool)
@@ -38,30 +39,35 @@ async def get_gemini_response(text):
     for i, api_key in enumerate(keys_pool):
         try:
             genai.configure(api_key=api_key)
+            # Используем gemini-1.5-flash для самой высокой скорости ответа
             model = genai.GenerativeModel('gemini-1.5-flash') 
             
             prompt = (
-                "Ты — Lal, тебе 16 лет. Ты мерзкий, грубый тип. Ты сидишь в чате и стебёшься над всеми. "
-                "Твой стиль: сплошной текст без переносов строк. Ошибайся, капси от злости. "
-                "ЗАПРЕЩЕНО: смайлы, тире, дефисы, жирный текст. Только ! . , ?. "
-                "Ответь ровно в 7 предложений чистой агрессии на русском."
+                "Ты — Lal, тебе 16 лет. Ты живой, грубый и мерзкий человек. "
+                "Ты сидишь в чате с настоящими людьми и просто стебёшься над ними. "
+                "Твой стиль: пиши сплошным текстом без переносов строк. "
+                "Делай грамматические ошибки, иногда пиши КАПСОМ от злости. "
+                "ЗАПРЕЩЕНО использовать: смайлики, жирный текст (**), тире, дефисы, нижние подчеркивания. "
+                "Разрешены только знаки: ! . , ?. Иногда специально пропускай запятые. "
+                "Твой ответ должен состоять ровно из 7 предложений ненависти. Пиши на русском."
             )
             
             response = await model.generate_content_async(f"{prompt}\n\nПользователь: {text}")
             
-            # Очистка от запрещенных знаков
+            # Жесткая очистка текста от лишних символов форматирования
             clean_text = response.text.replace("*", "").replace("-", "").replace("—", "").replace("_", "")
             return clean_text
 
         except (exceptions.ResourceExhausted, exceptions.InternalServerError, exceptions.ServiceUnavailable):
+            # Если ключ исчерпан или сбой сервера Google — берем следующий
             continue 
         except Exception as e:
-            logger.error(f"Ошибка на ключе: {str(e)[:50]}")
+            logger.error(f"Ошибка на ключе {i}: {str(e)[:50]}")
             continue
 
-    return "даже все мои ключи сдохли от твоей рожи вали отсюда"
+    return "слыш у меня даже все 35 ключей сдохли от твоей рожи вали отсюда"
 
-# --- Обработка сообщений ---
+# --- Основная логика бота ---
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
 
@@ -70,7 +76,7 @@ async def handle_message(message: types.Message):
     if not message.text:
         return
 
-    # Безопасная проверка упоминания (фикс AttributeError)
+    # Безопасная проверка упоминания (исправляет падение бота при пустых сущностях)
     bot_info = await bot.get_me()
     is_mentioned = False
     if message.entities:
@@ -79,34 +85,25 @@ async def handle_message(message: types.Message):
                 is_mentioned = True
                 break
 
-    # Отвечаем ВСЕГДА, если есть триггер или тег
+    # Мгновенная реакция на триггеры без задержек и шансов
     if is_mentioned or "лал" in message.text.lower() or "lal" in message.text.lower():
         try:
-            # Сразу показываем статус набора текста
+            # Визуальный индикатор набора текста
             await bot.send_chat_action(message.chat.id, "typing")
             
+            # Получаем ответ через систему ротации ключей
             full_reply = await get_gemini_response(message.text)
             
-            # Разбивка на 7 этапов для эффекта "живого" изменения
-            sentences = [s.strip() for s in full_reply.replace('!', '.').replace('?', '.').split('.') if s.strip()]
-            final_list = (sentences[:7] + ["че надо"] * 7)[:7]
-            
-            # Первое сообщение
-            sent_msg = await message.reply(final_list[0])
-            current_text = final_list[0]
-            
-            # Постепенное дописывание
-            for i in range(1, 7):
-                await asyncio.sleep(random.uniform(1.0, 3.0))
-                current_text += " " + final_list[i]
-                await sent_msg.edit_text(current_text)
+            # Отправляем весь текст сразу одним сообщением
+            await message.reply(full_reply)
                 
         except Exception as e:
-            logger.error(f"Ошибка в handle_message: {e}")
+            logger.error(f"Ошибка при отправке: {e}")
 
 async def main():
+    # Запуск сервера и бота
     await start_server()
-    logger.info(f"Lal Unstoppable запущен. Ключей: {len(ALL_KEYS)}")
+    logger.info(f"Lal Fast-Mode запущен. Ключей в обойме: {len(ALL_KEYS)}")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
